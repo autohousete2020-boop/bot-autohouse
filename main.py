@@ -191,3 +191,5 @@ def lead_flow(message: types.Message):
     if step == "budget":
         budget = "".join(ch for ch in message.text if ch.isdigit())
         if not budget:
+    bot.send_message(message.chat.id, "❌ Ви не ввели бюджет. Спробуйте ще раз.")
+    return
