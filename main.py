@@ -168,4 +168,4 @@ def cmd_post(message: types.Message):
 (Підпис — це текст під фото).""")
 
 @bot.message_handler(content_types=["photo"])
-def handle_admin_photo(message:
+def handle_admin_photo(message):
