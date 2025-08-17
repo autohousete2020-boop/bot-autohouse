@@ -4,7 +4,7 @@ import os
 
 logging.basicConfig(level=logging.INFO)
 
-TOKEN = os.getenv("BOT_TOKEN")
+TOKEN = os.getenv("BOT_TOKEN")  # токен беремо з env на Render
 bot = Bot(token=TOKEN)
 dp = Dispatcher(bot)
 
@@ -12,5 +12,5 @@ dp = Dispatcher(bot)
 async def send_welcome(message: types.Message):
     await message.reply("Привіт! Це бот АвтоХаус 🚗")
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     executor.start_polling(dp, skip_updates=True)
