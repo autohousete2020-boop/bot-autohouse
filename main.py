@@ -1,198 +1,192 @@
-# -*- coding: utf-8 -*-
+# main.py
 import os
-import logging
 import re
-from typing import Dict, Any
-
+import logging
 import telebot
-from telebot.types import (
-    ReplyKeyboardMarkup,
-    KeyboardButton,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-    Message,
-    Contact,
-)
+from telebot import types
 
-# -------------------- CONFIG --------------------
+# ---------- ENV ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "771906613"))
-# Публічний канал: тільки username БЕЗ @, наприклад "autohouse_te"
-CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "").strip()  # приклад: autohouse_te
-# Якщо плануєш приватний канал, краще завести CHANNEL_ID = "-100xxxxxxxxxx"
-# і далі використовувати саме його у bot.send_photo(CHANNEL_ID, ...)
+ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0") or "0")
+CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "").strip()  # e.g. @autohouse_te
+CHANNEL_ID = os.getenv("CHANNEL_ID", "").strip()  # numeric id for private channels (optional)
 
 if not BOT_TOKEN:
-    raise RuntimeError("ENV BOT_TOKEN не заданий.")
+    raise RuntimeError("Env BOT_TOKEN is empty. Set BOT_TOKEN in Render → Environment.")
+if not ADMIN_CHAT_ID:
+    raise RuntimeError("Env ADMIN_CHAT_ID is empty.")
 
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
-me = bot.get_me()
-BOT_LINK = f"https://t.me/{me.username}"
-
+# ---------- BOT ----------
 logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("bot")
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
+BOT_USERNAME = None  # заповнимо після get_me()
 
-# -------------------- ДЕРЖАВА ДЛЯ ЗАМОВЛЕНЬ --------------------
-# Проста памʼять у RAM для кроків замовлення
-user_state: Dict[int, Dict[str, Any]] = {}
-# Флаг очікування посту після /post
-awaiting_post_photo: Dict[int, bool] = {}
+# Пам'ять діалогів
+user_state = {}   # chat_id -> step name
+order_data = {}   # chat_id -> dict
 
-ASK_MODEL = "ask_model"
-ASK_BUDGET = "ask_budget"
-ASK_YEAR = "ask_year"
-ASK_PHONE = "ask_phone"
+def channel_target():
+    """Куди постити: публічний @username або числовий id."""
+    return CHANNEL_ID if CHANNEL_ID else CHANNEL_USERNAME
 
-# -------------------- ДОП. КНОПКИ --------------------
-def main_menu_kb() -> ReplyKeyboardMarkup:
-    kb = ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.row("🚗 Зробити замовлення")
-    kb.row("📞 Контакти", "ℹ️ Допомога")
-    return kb
+# --------- УТИЛІТИ ----------
+PHONE_RE = re.compile(r"^\+?\d[\d\s\-\(\)]{7,}$")
 
-def contact_kb() -> ReplyKeyboardMarkup:
-    kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-    kb.add(KeyboardButton("📱 Надіслати номер телефону", request_contact=True))
-    kb.add(KeyboardButton("🔙 Скасувати"))
-    return kb
+def ask_make(chat_id):
+    user_state[chat_id] = "make"
+    bot.send_message(chat_id, "Яка марка/модель цікавить?")
 
-def order_button_inline() -> InlineKeyboardMarkup:
-    m = InlineKeyboardMarkup()
-    # deep-link повертає користувача в бота і стартує форму
-    m.add(InlineKeyboardButton("📝 Залишити заявку", url=f"{BOT_LINK}?start=order"))
-    return m
+def ask_budget(chat_id):
+    user_state[chat_id] = "budget"
+    bot.send_message(chat_id, "Який бюджет (у $)?")
 
-# -------------------- ДОПОМОЖНІ --------------------
-def sanitize_text(s: str) -> str:
-    """Очищення зайвих пробілів/переносів, безпечне для HTML."""
-    return re.sub(r"\s+", " ", s).strip()
+def ask_year(chat_id):
+    user_state[chat_id] = "year"
+    bot.send_message(chat_id, "Бажаний рік випуску?")
 
-def valid_budget(text: str) -> bool:
-    return bool(re.fullmatch(r"\d{1,9}", text.replace(" ", "")))
-
-def valid_year(text: str) -> bool:
-    return bool(re.fullmatch(r"(19[6-9]\d|20\d{2})", text.strip()))
-
-def normalize_phone(raw: str) -> str:
-    # Проста нормалізація: залишаємо + та цифри
-    s = re.sub(r"[^\d+]", "", raw)
-    return s
-
-def lead_text(lead: Dict[str, Any]) -> str:
-    brand = sanitize_text(lead.get("brand", "—"))
-    budget = sanitize_text(lead.get("budget", "—"))
-    year = sanitize_text(lead.get("year", "—"))
-    phone = sanitize_text(lead.get("phone", "—"))
-
-    return (
-        "✅ <b>Запит прийнято!</b>\n"
-        f"• <b>Марка/модель:</b> {brand}\n"
-        f"• <b>Бюджет:</b> {budget}$\n"
-        f"• <b>Рік:</b> {year}\n\n"
-        f"Наш менеджер звʼяжеться з вами. "
-        f"<b>Телефон:</b> {phone}"
+def ask_phone(chat_id):
+    user_state[chat_id] = "phone"
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    kb.add(types.KeyboardButton("📞 Поділитися телефоном", request_contact=True))
+    kb.add(types.KeyboardButton("Пропустити й ввести вручну"))
+    bot.send_message(
+        chat_id,
+        "Залиште номер телефону для зв'язку.\n"
+        "Натисніть кнопку нижче або надішліть номер повідомленням.",
+        reply_markup=kb
     )
 
-def admin_lead_text(user: telebot.types.User, lead: Dict[str, Any]) -> str:
+def clear_state(chat_id):
+    user_state.pop(chat_id, None)
+    order_data.pop(chat_id, None)
+    bot.send_chat_action(chat_id, "typing")
+
+def lead_card(data: dict) -> str:
     return (
-        "🆕 <b>Нова заявка</b>\n"
-        f"👤 Користувач: <b>{user.first_name or ''} {user.last_name or ''}</b> @{user.username or '—'} (id {user.id})\n\n"
-        f"{lead_text(lead)}"
+        "✅ <b>Запит прийнято!</b>\n\n"
+        f"• <b>Марка/модель:</b> {telebot.util.escape(data.get('make',''))}\n"
+        f"• <b>Бюджет:</b> {telebot.util.escape(str(data.get('budget','')))}$\n"
+        f"• <b>Рік:</b> {telebot.util.escape(str(data.get('year','')))}\n"
+        f"• <b>Телефон клієнта:</b> {telebot.util.escape(data.get('phone','—'))}"
     )
 
-# -------------------- ХЕНДЛЕРИ --------------------
+def admin_lead_card(user, data: dict) -> str:
+    name = telebot.util.escape(f"{user.first_name or ''} {user.last_name or ''}".strip())
+    uname = f"@{user.username}" if getattr(user, 'username', None) else "—"
+    uid = user.id
+    return (
+        "📥 <b>Нова заявка</b>\n\n"
+        f"👤 <b>Клієнт:</b> {name or '—'} ({uname}), id: <code>{uid}</code>\n"
+        f"📞 <b>Телефон:</b> {telebot.util.escape(data.get('phone','—'))}\n"
+        f"🚗 <b>Марка/модель:</b> {telebot.util.escape(data.get('make',''))}\n"
+        f"💵 <b>Бюджет:</b> {telebot.util.escape(str(data.get('budget','')))}$\n"
+        f"📅 <b>Рік:</b> {telebot.util.escape(str(data.get('year','')))}"
+    )
+
+# ---------- МЕНЮ ----------
+def main_menu():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add(types.KeyboardButton("🚗 Зробити замовлення"))
+    kb.add(types.KeyboardButton("📞 Контакти"), types.KeyboardButton("ℹ️ Допомога"))
+    return kb
+
 @bot.message_handler(commands=["start"])
-def cmd_start(message: Message):
-    # Підтримка deep-link /start order
-    if message.text and " " in message.text:
-        arg = message.text.split(" ", 1)[1].strip()
-        if arg.lower().startswith("order"):
-            _start_order(message)
-            return
+def cmd_start(message: types.Message):
+    global BOT_USERNAME
+    if BOT_USERNAME is None:
+        me = bot.get_me()
+        BOT_USERNAME = me.username
 
-    welcome = (
-        "Привіт! Це бот <b>AutoHouse</b>.\n"
+    text = (
+        "<b>Привіт!</b> Це бот AutoHouse.\n"
         "Підберу авто з США/Європи під ключ.\n\n"
-        "Натисни «🚗 Зробити замовлення», щоб залишити заявку."
+        "Натисни «🚗 Зробити замовлення» або /order."
     )
-    bot.reply_to(message, welcome, reply_markup=main_menu_kb())
-
-@bot.message_handler(func=lambda m: m.text == "ℹ️ Допомога", content_types=["text"])
-@bot.message_handler(commands=["help"])
-def cmd_help(message: Message):
-    bot.reply_to(
-        message,
-        "Щоб оформити заявку — натисни «🚗 Зробити замовлення» або команду /order.\n"
-        "Для публікації в канал — у приваті з ботом введи /post і далі надішли <b>фото з підписом</b>.",
-        reply_markup=main_menu_kb(),
-    )
-
-@bot.message_handler(func=lambda m: m.text == "📞 Контакти", content_types=["text"])
-def contacts(message: Message):
-    bot.reply_to(
-        message,
-        "📞 <b>Контакти</b>\n"
-        "Телефон: +38 096 067 01 90\n"
-        "Instagram: https://instagram.com/autohouse.te\n"
-        "Місто: Тернопіль",
-        reply_markup=main_menu_kb(),
-    )
+    bot.send_message(message.chat.id, text, reply_markup=main_menu())
+    # Якщо прийшли з параметром start=lead — одразу форма
+    if message.text and " " in message.text:
+        _, param = message.text.split(" ", 1)
+        if param.strip().lower().startswith("lead"):
+            ask_make(message.chat.id)
 
 @bot.message_handler(commands=["order"])
-@bot.message_handler(func=lambda m: m.text == "🚗 Зробити замовлення", content_types=["text"])
-def start_order(message: Message):
-    _start_order(message)
+def cmd_order(message: types.Message):
+    order_data[message.chat.id] = {}
+    ask_make(message.chat.id)
 
-def _start_order(message: Message):
-    user_state[message.from_user.id] = {"step": ASK_MODEL}
-    bot.reply_to(message, "Яка марка/модель цікавить?", reply_markup=ReplyKeyboardMarkup(resize_keyboard=True).add(KeyboardButton("🔙 Скасувати")))
+@bot.message_handler(commands=["help"])
+def cmd_help(message: types.Message):
+    bot.send_message(
+        message.chat.id,
+        "Напишіть у меню «🚗 Зробити замовлення», а я задам кілька питань і передам заявку менеджеру.\n"
+        "Команди: /start, /order, /post (для адміна)."
+    )
 
-@bot.message_handler(content_types=["text"])
-def on_text(message: Message):
-    uid = message.from_user.id
-    if message.text == "🔙 Скасувати":
-        user_state.pop(uid, None)
-        awaiting_post_photo.pop(uid, None)
-        bot.reply_to(message, "Скасовано. Оберіть дію з меню.", reply_markup=main_menu_kb())
+@bot.message_handler(commands=["contacts", "contact"])
+def cmd_contacts(message: types.Message):
+    bot.send_message(
+        message.chat.id,
+        "📞 Телефон: <b>+38 096 067 01 90</b>\n"
+        "Instagram: <a href='https://instagram.com/autohouse.te'>@autohouse.te</a>\n"
+        "Адреса: Тернопіль",
+        disable_web_page_preview=True
+    )
+
+@bot.message_handler(func=lambda m: m.text == "📞 Контакти")
+def btn_contacts(message: types.Message):
+    cmd_contacts(message)
+
+@bot.message_handler(func=lambda m: m.text == "ℹ️ Допомога")
+def btn_help(message: types.Message):
+    cmd_help(message)
+
+@bot.message_handler(func=lambda m: m.text == "🚗 Зробити замовлення")
+def btn_order(message: types.Message):
+    cmd_order(message)
+
+# ---------- ФОРМА ЗАЯВКИ ----------
+@bot.message_handler(content_types=["contact"])
+def on_contact(message: types.Message):
+    if user_state.get(message.chat.id) != "phone":
+        return
+    phone = message.contact.phone_number
+    order_data.setdefault(message.chat.id, {})["phone"] = phone
+    finish_lead(message)
+
+@bot.message_handler(func=lambda m: user_state.get(m.chat.id) in {"make", "budget", "year", "phone"}, content_types=["text"])
+def order_steps(message: types.Message):
+    chat_id = message.chat.id
+    state = user_state.get(chat_id)
+
+    if state == "make":
+        order_data.setdefault(chat_id, {})["make"] = message.text.strip()
+        ask_budget(chat_id)
         return
 
-    # Обробка кроків заявки
-    st = user_state.get(uid)
-    if st:
-        step = st.get("step")
+    if state == "budget":
+        # просто збережемо як є; можна додати перевірку на число
+        order_data.setdefault(chat_id, {})["budget"] = re.sub(r"[^\d]", "", message.text) or message.text.strip()
+        ask_year(chat_id)
+        return
 
-        if step == ASK_MODEL:
-            st["brand"] = sanitize_text(message.text)
-            st["step"] = ASK_BUDGET
-            bot.reply_to(message, "Який бюджет (у $)?", reply_markup=ReplyKeyboardMarkup(resize_keyboard=True).add(KeyboardButton("🔙 Скасувати")))
+    if state == "year":
+        order_data.setdefault(chat_id, {})["year"] = re.sub(r"[^\d]", "", message.text) or message.text.strip()
+        ask_phone(chat_id)
+        return
+
+    if state == "phone":
+        txt = message.text.strip()
+        if txt.lower().startswith("пропустити"):
+            bot.send_message(chat_id, "Надішліть номер повідомленням або натисніть кнопку 'Поділитися телефоном'.")
             return
-
-        if step == ASK_BUDGET:
-            val = message.text.replace(" ", "")
-            if not valid_budget(val):
-                bot.reply_to(message, "Введіть бюджет цифрами, наприклад: 15000")
-                return
-            st["budget"] = val
-            st["step"] = ASK_YEAR
-            bot.reply_to(message, "Бажаний рік випуску?")
+        if not PHONE_RE.match(txt):
+            bot.send_message(chat_id, "Будь ласка, надішліть номер у форматі +380XXXXXXXXX.")
             return
+        order_data.setdefault(chat_id, {})["phone"] = txt
+        finish_lead(message)
 
-        if step == ASK_YEAR:
-            if not valid_year(message.text.strip()):
-                bot.reply_to(message, "Введіть рік, наприклад: 2018")
-                return
-            st["year"] = message.text.strip()
-            st["step"] = ASK_PHONE
-            bot.reply_to(
-                message,
-                "Залиште номер телефону (можна у форматі +380...) "
-                "або натисніть кнопку:",
-                reply_markup=contact_kb(),
-            )
-            return
-
-        if step == ASK_PHONE:
-            phone = normalize_phone(message.text)
-            if len(phone) < 10:
-                bot.reply_to(message, "Будь ласка, вкажіть дійсний номер. Приклад: +380960000000")
-                return
+def finish_lead(message: types.Message):
+    chat_id = message.chat.id
+    data = order_data.get(chat_id, {})
+    # Картка клієнту
+    bot.send_message(chat_id, lead_c
