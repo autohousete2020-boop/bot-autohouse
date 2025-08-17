@@ -1,16 +1,24 @@
-import logging
-from aiogram import Bot, Dispatcher, executor, types
 import os
+import telebot
 
-logging.basicConfig(level=logging.INFO)
+TOKEN = os.getenv("BOT_TOKEN")
+if not TOKEN:
+    raise RuntimeError("Set BOT_TOKEN in Render → Settings → Environment")
 
-TOKEN = os.getenv("BOT_TOKEN")  # токен беремо з env на Render
-bot = Bot(token=TOKEN)
-dp = Dispatcher(bot)
+bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
 
-@dp.message_handler(commands=['start'])
-async def send_welcome(message: types.Message):
-    await message.reply("Привіт! Це бот АвтоХаус 🚗")
+@bot.message_handler(commands=['start', 'help'])
+def start(msg):
+    bot.reply_to(msg, "Привіт! Це бот АвтоХаус 🚗 Готовий приймати запити.")
+
+@bot.message_handler(commands=['lead'])
+def lead(msg):
+    bot.reply_to(msg, "Напиши марку, модель і бюджет — передам Назару.")
+
+@bot.message_handler(func=lambda m: True)
+def echo(msg):
+    bot.reply_to(msg, f"Прийняв: <b>{msg.text}</b>\nНазар зв'яжеться найближчим часом.")
 
 if __name__ == "__main__":
-    executor.start_polling(dp, skip_updates=True)
+    # нескінченний long-polling без вебхуків
+    bot.infinity_polling(skip_pending=True)
