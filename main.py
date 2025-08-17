@@ -1,65 +1,52 @@
-# main.py
 import os
 import telebot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# Токен беремо з Environment Variable на Render: BOT_TOKEN
-TOKEN = os.getenv("BOT_TOKEN")
-if not TOKEN:
-    raise RuntimeError("BOT_TOKEN is not set in environment")
+# 1) Токен беремо з Environment Variables (BOT_TOKEN)
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+bot = telebot.TeleBot(BOT_TOKEN)
 
-bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
-
-# Твої контактні дані
-PHONE_DISPLAY = "+38 096 067 01 90"
-PHONE_TEL = "+380960670190"  # для кнопки tel:
-INSTAGRAM_URL = "https://instagram.com/autohouse.te"  # заміни, якщо інший @
-CITY = "Ternopil"
-
-ABOUT_TEXT = (
-    "🚗 <b>Авто з США та Європи під ключ</b>\n"
+# 2) Текст вітання
+WELCOME_TEXT = (
+    "🚗 Авто з США та Європи під ключ\n"
     "🇺🇸 США | 🇪🇺 Європа ➡️ 🇺🇦 Україна\n"
-    f"📱 <b>{PHONE_DISPLAY}</b>\n"
+    "📱 +38 096 067 01 90\n"
     "📦 Доставка + митниця + ремонт\n"
     "💵 Економія від 20%\n"
     "✉️ Пиши в Direct\n"
-    f"<i>{CITY}</i>"
+    "📍Ternopil"
 )
 
-def start_keyboard():
-    kb = telebot.types.InlineKeyboardMarkup()
-    kb.add(
-        telebot.types.InlineKeyboardButton("📞 Подзвонити", url=f"tel:{PHONE_TEL}"),
-        telebot.types.InlineKeyboardButton("📸 Instagram", url=INSTAGRAM_URL),
-    )
+# 3) Посилання для кнопок (за потреби підміниш)
+CALL_URL = "tel:+380960670190"
+TG_URL   = "https://t.me/AutoTernopil_bot"       # або лінк на твій профіль/чат
+IG_URL   = "https://instagram.com/autohouse.te"  # підстав свій інстаграм
+SITE_URL = "https://autohouse.te"                # якщо немає сайту — можеш забрати кнопку
+
+def main_keyboard() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("📞 Подзвонити", url=CALL_URL))
+    kb.add(InlineKeyboardButton("💬 Написати в Telegram", url=TG_URL))
+    kb.add(InlineKeyboardButton("📷 Instagram", url=IG_URL))
+    kb.add(InlineKeyboardButton("🌐 Сайт", url=SITE_URL))
     return kb
 
-@bot.message_handler(commands=["start", "help"])
-def on_start(message: telebot.types.Message):
-    # Пробуємо відправити логотип, якщо файл є в репозиторії
+@bot.message_handler(commands=['start', 'help'])
+def cmd_start(message):
+    # 4) Шлях до лого (файл уже в корені репозиторію як logo.png)
+    logo_path = "logo.png"
     try:
-        with open("logo.png", "rb") as f:
+        with open(logo_path, "rb") as photo:
             bot.send_photo(
                 message.chat.id,
-                f,
-                caption=ABOUT_TEXT,
-                reply_markup=start_keyboard(),
+                photo,
+                caption=WELCOME_TEXT,
+                reply_markup=main_keyboard()
             )
     except FileNotFoundError:
-        # Якщо logo.png немає — просто текст
-        bot.send_message(
-            message.chat.id,
-            ABOUT_TEXT,
-            reply_markup=start_keyboard(),
-        )
+        # Якщо раптом немає файлу — відправимо тільки текст
+        bot.send_message(message.chat.id, WELCOME_TEXT, reply_markup=main_keyboard())
 
-@bot.message_handler(func=lambda m: True, content_types=["text"])
-def fallback(message: telebot.types.Message):
-    bot.reply_to(
-        message,
-        "Напишіть /start, щоб отримати контакти та посилання 😉",
-        reply_markup=start_keyboard(),
-    )
-
+# 5) Запускаємо довге опитування
 if __name__ == "__main__":
-    # long polling для Render Background Worker
-    bot.infinity_polling(timeout=60, skip_pending=True)
+    bot.infinity_polling(skip_pending=True)
