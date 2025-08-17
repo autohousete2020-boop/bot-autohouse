@@ -1,191 +1,219 @@
+# main.py
 import os
 import logging
-from telebot import TeleBot, types
+from typing import Dict, Any
 
-# ============ CONFIG ============
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is not set in environment variables")
+import telebot
+from telebot import types
 
-# Адмін для отримання заявок (твій ID)
-try:
-    ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "771906613"))
-except ValueError:
-    ADMIN_CHAT_ID = 771906613
-
-# Канал для публікацій (/post). Може бути '@username' або -100XXXXXXXXXX
-CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "").strip()  # optional
-
-# Логування
+# ---------- Налаштування логів ----------
 logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("autohouse")
+logger = logging.getLogger("bot")
 
-# ===============================
+# ---------- Змінні оточення ----------
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+if not BOT_TOKEN:
+    raise RuntimeError("ENV BOT_TOKEN is empty!")
 
-bot = TeleBot(BOT_TOKEN, parse_mode="HTML")
-user_state = {}  # chat_id -> dict
+# Можна задавати з ENV. Якщо не задано – беремо значення за замовчуванням нижче.
+ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "771906613"))
+CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "@autohouse_te").strip()  # ваш публічний канал @xxxxx
 
-# ---------- helpers ----------
-def main_menu():
+# Телефон компанії (для кнопки «Контакти» та текстів)
+BUSINESS_PHONE = "+38 096 067 01 90"
+
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
+
+# Збереження простих станів користувача (без БД)
+user_states: Dict[int, Dict[str, Any]] = {}
+
+# Імена кроків анкети
+STEP_BRAND = "brand"
+STEP_BUDGET = "budget"
+STEP_YEAR = "year"
+STEP_CONTACT = "contact"
+STEP_DONE = "done"
+
+# Отримаємо @username бота для deep-link
+_me = bot.get_me()
+BOT_USERNAME = _me.username  # без @
+
+
+# ---------- Корисні клавіатури ----------
+def main_menu_kb() -> types.ReplyKeyboardMarkup:
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add(types.KeyboardButton("🚗 Зробити замовлення"))
+    kb.row(types.KeyboardButton("🚗 Зробити замовлення"))
     kb.row(types.KeyboardButton("📞 Контакти"), types.KeyboardButton("ℹ️ Допомога"))
     return kb
 
-def clear_state(chat_id):
-    user_state.pop(chat_id, None)
 
-def ask_car(chat_id):
-    bot.send_message(chat_id, "Яка марка/модель цікавить?", reply_markup=types.ReplyKeyboardRemove())
-    # наступний крок: бюджет буде зареєстровано у handler тексту
+def contact_request_kb() -> types.ReplyKeyboardMarkup:
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    kb.add(types.KeyboardButton("📱 Поділитися номером", request_contact=True))
+    kb.add(types.KeyboardButton("Пропустити та ввести вручну"))
+    return kb
 
-def deep_link_button():
-    # Кнопка «Залишити заявку» під постом у каналі
-    try:
-        username = bot.get_me().username
-    except Exception:
-        username = ""
-    url = f"https://t.me/{username}?start=order" if username else "https://t.me/"
+
+def channel_cta_inline_kb() -> types.InlineKeyboardMarkup:
+    # Кнопка веде у бот із deep-link параметром start=order (відкриє анкету)
+    url = f"https://t.me/{BOT_USERNAME}?start=order"
     ikb = types.InlineKeyboardMarkup()
     ikb.add(types.InlineKeyboardButton("📝 Залишити заявку", url=url))
     return ikb
 
-# ---------- start / menu ----------
+
+# ---------- Допоміжне ----------
+def start_order(chat_id: int):
+    user_states[chat_id] = {"step": STEP_BRAND}
+    bot.send_message(chat_id, "Яка марка/модель цікавить?", reply_markup=types.ReplyKeyboardRemove())
+
+
+def send_order_to_admin(order: Dict[str, Any], user: types.User):
+    text = (
+        "🆕 <b>Нова заявка</b>\n"
+        f"👤 Від: <a href=\"tg://user?id={user.id}\">{user.first_name or ''} {user.last_name or ''}</a> @{user.username or ''}\n\n"
+        f"• Марка/модель: <b>{order.get('brand','-')}</b>\n"
+        f"• Бюджет: <b>{order.get('budget','-')}</b>\n"
+        f"• Рік: <b>{order.get('year','-')}</b>\n"
+        f"• Телефон клієнта: <b>{order.get('contact','не надано')}</b>"
+    )
+    bot.send_message(ADMIN_CHAT_ID, text)
+
+
+# ---------- Команди ----------
 @bot.message_handler(commands=["start"])
-def cmd_start(message: types.Message):
-    # deep-link ?start=order -> одразу анкета
-    arg = message.text.split(maxsplit=1)
-    if len(arg) > 0 and " " in message.text:
-        # старі клієнти Telegram можуть передавати через пробіл
-        pass
-    # через /start startparam у нових клієнтів:
-    # message.text виглядає як "/start order"
-    parts = message.text.split(maxsplit=1)
-    if len(parts) == 2 and parts[1].strip().lower() == "order":
-        start_order(message)
+def cmd_start(m: types.Message):
+    # Deep-link: /start order -> одразу анкета
+    if m.text and len(m.text.split()) > 1 and m.text.split()[1].lower() == "order":
+        bot.send_message(
+            m.chat.id,
+            "Привіт! 👋 Давайте оформимо запит на підбір авто.\nВідповідайте, будь ласка, на кілька питань.",
+            reply_markup=main_menu_kb(),
+        )
+        start_order(m.chat.id)
         return
 
-    text = (
-        "Привіт! Це бот <b>AutoHouse</b>.\n"
-        "Підберу авто з США/Європи під ключ.\n\n"
-        "Натисни «🚗 Зробити замовлення»."
+    bot.send_message(
+        m.chat.id,
+        (
+            "Привіт! Це бот <b>AutoHouse</b>.\n"
+            "Підберу авто з США/Європи під ключ.\n\n"
+            "Натисни «🚗 Зробити замовлення» або /order."
+        ),
+        reply_markup=main_menu_kb(),
     )
-    bot.send_message(message.chat.id, text, reply_markup=main_menu())
 
-@bot.message_handler(func=lambda m: m.text == "ℹ️ Допомога")
-def on_help(message: types.Message):
-    text = (
-        "Можу допомогти з підбором авто під ключ: США 🇺🇸 / Європа 🇪🇺 → Україна 🇺🇦\n"
-        "Почни з кнопки «🚗 Зробити замовлення», відповідай на кілька запитань, і я зв’яжусь."
+
+@bot.message_handler(commands=["help"])
+def cmd_help(m: types.Message):
+    bot.send_message(
+        m.chat.id,
+        "Команди:\n"
+        "• /start – головне меню\n"
+        "• /order – оформити запит на підбір авто\n"
+        "• /post – (тільки адмін) опублікувати пост у каналі з кнопкою «Залишити заявку»",
+        reply_markup=main_menu_kb(),
     )
-    bot.send_message(message.chat.id, text)
 
-@bot.message_handler(func=lambda m: m.text == "📞 Контакти")
-def on_contacts(message: types.Message):
-    text = (
-        "📞 <b>Авто з США та Європи під ключ</b>\n"
-        "• Доставка + митниця + ремонт\n"
-        "• Економія від 20%\n\n"
-        "Зв'язок: +38 096 067 01 90\n"
-        "Instagram: https://instagram.com/autohouse.te"
-    )
-    bot.send_message(message.chat.id, text, disable_web_page_preview=True)
 
-# ---------- order flow ----------
 @bot.message_handler(commands=["order"])
-def start_order(message: types.Message):
-    chat_id = message.chat.id
-    clear_state(chat_id)
-    user_state[chat_id] = {}
-    ask_car(chat_id)
+def cmd_order(m: types.Message):
+    bot.send_message(m.chat.id, "Розпочинаємо оформлення запиту. Це займе 1–2 хвилини.")
+    start_order(m.chat.id)
 
-@bot.message_handler(func=lambda m: m.text == "🚗 Зробити замовлення")
-def order_btn(message: types.Message):
-    start_order(message)
 
-@bot.message_handler(func=lambda m: m.chat.id in user_state and "car" not in user_state[m.chat.id])
-def step_car(message: types.Message):
-    chat_id = message.chat.id
-    user_state[chat_id]["car"] = message.text.strip()
-    bot.send_message(chat_id, "Який бюджет (у $)?")
-    # Далі чекаємо бюджет
+# ---------- Меню кнопок ----------
+@bot.message_handler(func=lambda msg: msg.text == "🚗 Зробити замовлення")
+def menu_order(m: types.Message):
+    start_order(m.chat.id)
 
-@bot.message_handler(func=lambda m: m.chat.id in user_state and "budget" not in user_state[m.chat.id] and "car" in user_state[m.chat.id])
-def step_budget(message: types.Message):
-    chat_id = message.chat.id
-    user_state[chat_id]["budget"] = message.text.strip()
-    bot.send_message(chat_id, "Бажаний рік випуску?")
-    # Далі чекаємо рік
 
-@bot.message_handler(func=lambda m: m.chat.id in user_state and "year" not in user_state[m.chat.id] and "budget" in user_state[m.chat.id])
-def step_year(message: types.Message):
-    chat_id = message.chat.id
-    user_state[chat_id]["year"] = message.text.strip()
+@bot.message_handler(func=lambda msg: msg.text == "📞 Контакти")
+def menu_contacts(m: types.Message):
+    bot.send_message(
+        m.chat.id,
+        f"Ми на зв'язку:\n• Телефон: <b>{BUSINESS_PHONE}</b>\n• Канал: {CHANNEL_USERNAME}",
+        reply_markup=main_menu_kb(),
+    )
 
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-    kb.add(types.KeyboardButton("📱 Надати мій номер", request_contact=True))
-    bot.send_message(chat_id, "Введіть ваш номер телефону або натисніть кнопку нижче ⬇️", reply_markup=kb)
-    # Далі чекаємо телефон
 
-@bot.message_handler(content_types=["contact"])
-def got_contact(message: types.Message):
-    # Якщо юзер натиснув кнопку «Надати мій номер»
-    chat_id = message.chat.id
-    if chat_id not in user_state:
+@bot.message_handler(func=lambda msg: msg.text == "ℹ️ Допомога")
+def menu_help(m: types.Message):
+    cmd_help(m)
+
+
+# ---------- Анкета (проста FSM без БД) ----------
+@bot.message_handler(content_types=["text", "contact"])
+def questionnaire(m: types.Message):
+    st = user_states.get(m.chat.id)
+
+    # якщо не в анкеті — ігноруємо
+    if not st or st.get("step") is None:
         return
-    phone = message.contact.phone_number
-    finish_order_with_phone(chat_id, phone)
 
-@bot.message_handler(func=lambda m: m.chat.id in user_state and "phone" not in user_state[m.chat.id] and m.content_type == "text")
-def step_phone_text(message: types.Message):
-    # Якщо юзер ввів телефон текстом
-    chat_id = message.chat.id
-    phone = message.text.strip()
-    finish_order_with_phone(chat_id, phone)
+    step = st["step"]
 
-def finish_order_with_phone(chat_id: int, phone: str):
-    user_state[chat_id]["phone"] = phone
-    data = user_state[chat_id]
+    # 1) Марка/модель
+    if step == STEP_BRAND:
+        st["brand"] = m.text.strip()
+        st["step"] = STEP_BUDGET
+        bot.send_message(m.chat.id, "Який бюджет (у $)?")
+        return
 
-    summary = (
-        "✅ <b>Запит прийнято!</b>\n\n"
-        f"• <b>Марка/модель:</b> {data.get('car','—')}\n"
-        f"• <b>Бюджет:</b> {data.get('budget','—')}$\n"
-        f"• <b>Рік:</b> {data.get('year','—')}\n"
-        f"• <b>Телефон:</b> {data.get('phone','—')}\n\n"
-        "Ми з вами скоро зв’яжемось!"
-    )
-    bot.send_message(chat_id, summary, reply_markup=main_menu())
+    # 2) Бюджет
+    if step == STEP_BUDGET:
+        st["budget"] = m.text.strip()
+        st["step"] = STEP_YEAR
+        bot.send_message(m.chat.id, "Бажаний рік випуску?")
+        return
 
-    admin_text = (
-        "🔔 <b>НОВЕ ЗАМОВЛЕННЯ</b>\n\n"
-        f"Марка/модель: {data.get('car','—')}\n"
-        f"Бюджет: {data.get('budget','—')}$\n"
-        f"Рік: {data.get('year','—')}\n"
-        f"Телефон клієнта: {data.get('phone','—')}"
-    )
-    try:
-        bot.send_message(ADMIN_CHAT_ID, admin_text)
-    except Exception as e:
-        log.error(f"Can't send to admin: {e}")
+    # 3) Рік
+    if step == STEP_YEAR:
+        st["year"] = m.text.strip()
+        st["step"] = STEP_CONTACT
+        bot.send_message(
+            m.chat.id,
+            "Залиште ваш номер телефону, будь ласка.",
+            reply_markup=contact_request_kb(),
+        )
+        return
 
-    clear_state(chat_id)
+    # 4) Контакт (через share contact або текстом)
+    if step == STEP_CONTACT:
+        phone = None
+        if m.content_type == "contact" and m.contact and m.contact.phone_number:
+            phone = m.contact.phone_number
+        else:
+            # якщо користувач натисне «Пропустити та ввести вручну» – наступне повідомлення беремо як телефон
+            phone = (m.text or "").strip()
 
-# ---------- posting to channel (optional) ----------
+        st["contact"] = phone if phone else "не надано"
+        st["step"] = STEP_DONE
+
+        # Підтвердження клієнту
+        bot.send_message(
+            m.chat.id,
+            (
+                "✅ <b>Запит прийнято!</b>\n"
+                f"• Марка/модель: <b>{st.get('brand')}</b>\n"
+                f"• Бюджет: <b>{st.get('budget')}</b>\n"
+                f"• Рік: <b>{st.get('year')}</b>\n"
+                f"• Телефон: <b>{st.get('contact')}</b>\n\n"
+                "Ми зв'яжемося з вами найближчим часом. Дякуємо! 🙌"
+            ),
+            reply_markup=main_menu_kb(),
+        )
+
+        # Повідомлення адмінам
+        send_order_to_admin(st, m.from_user)
+
+        # Очистимо стан
+        user_states.pop(m.chat.id, None)
+        return
+
+
+# ---------- Публікація постів у канал (для адміна) ----------
 @bot.message_handler(commands=["post"])
-def cmd_post(message: types.Message):
-    """
-    Простий режим публікації в канал:
-    - доступно тільки адміну (ADMIN_CHAT_ID)
-    - попросимо надіслати фото з підписом або просто текст
-    - опублікуємо в CHANNEL_USERNAME (якщо задано), додамо кнопку «Залишити заявку»
-    """
-    if message.chat.id != ADMIN_CHAT_ID:
-        bot.reply_to(message, "Ця команда доступна тільки адміну.")
-        return
-
-    if not CHANNEL_USERNAME:
-        bot.reply_to(message, "Не задано CHANNEL_USERNAME в змінних середовища.")
-        return
-
-    bot.reply_to(message, "Надішли <b>фото з підписом</b> або пр
+def cmd_post(m: types.Message):
+    if m.chat.id != ADMIN_CHAT_ID:
+        bot.reply_to(m, "Команда доступна тільки адміністратору.")
