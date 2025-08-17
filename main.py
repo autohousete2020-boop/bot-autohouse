@@ -124,4 +124,5 @@ def on_photo(message: types.Message):
 # ---- Запуск ----
 if __name__ == "__main__":
     # нескінченний полінг (Render Background Worker)
-    bot.infinity_polling(skip_pending=True, logger_level="INFO")
+    import logging
+bot.infinity_polling(skip_pending=True, logger_level=logging.INFO)
