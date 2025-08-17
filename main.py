@@ -1,167 +1,146 @@
 import os
 import logging
-from telebot import TeleBot, types
+import telebot
+from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 
-# ==== Налаштування через змінні оточення ====
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))             # твій telegram id (для заявок і доступу до /post)
-CHANNEL_ID = os.getenv("CHANNEL_ID")                   # -100xxxxxxxxxx або @username
-PHONE_E164 = os.getenv("PHONE_E164", "+380960670190")  # для кнопки "Подзвонити"
+# ---------- Налаштування логів ----------
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO))
+log = logging.getLogger("bot")
+
+# ---------- Змінні середовища ----------
+TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = os.getenv("ADMIN_ID")  # число у вигляді рядка — конвертуємо нижче
+CHANNEL_ID = os.getenv("CHANNEL_ID")  # @public_name або -100xxxxxxxxxx
+PHONE_E164 = os.getenv("PHONE_E164", "+380960670190")
 PHONE_READABLE = os.getenv("PHONE_READABLE", "+38 096 067 01 90")
 
-assert BOT_TOKEN and CHANNEL_ID, "BOT_TOKEN і CHANNEL_ID обов'язкові!"
+if not TOKEN:
+    raise RuntimeError("BOT_TOKEN is not set")
 
-logging.basicConfig(level=logging.INFO)
-bot = TeleBot(BOT_TOKEN, parse_mode="HTML")
+# ---------- Бот ----------
+bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
 
-# Пам’ять діалогів заявки (дуже проста)
-orders = {}  # user_id -> {"step": str, "data": {...}}
+# Вимикаємо вебхук на всяк випадок (щоб polling не ловив 409)
+try:
+    bot.delete_webhook(drop_pending_updates=True)
+except Exception as e:
+    log.warning(f"delete_webhook failed: {e}")
 
-# ===== Допоміжні =====
-def is_admin(user_id: int) -> bool:
-    return ADMIN_ID and user_id == ADMIN_ID
+def is_admin(chat_id) -> bool:
+    try:
+        return ADMIN_ID is not None and int(chat_id) == int(ADMIN_ID)
+    except Exception:
+        return False
 
-def channel_button_row():
-    kb = types.InlineKeyboardMarkup()
-    kb.add(
-        types.InlineKeyboardButton("📞 Подзвонити", url=f"tel:{PHONE_E164}"),
-        types.InlineKeyboardButton("📝 Залишити заявку", callback_data="order_start"),
-    )
+# ---------- Клавіатура ----------
+def main_kb():
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add(KeyboardButton("🚗 Зробити замовлення"))
+    kb.add(KeyboardButton("📞 Контакти"), KeyboardButton("ℹ️ Допомога"))
     return kb
 
-def order_summary(data: dict) -> str:
-    return (
-        "<b>Нова заявка</b>\n"
-        f"🚗 Марка/Модель: <b>{data.get('car','-')}</b>\n"
-        f"💸 Бюджет: <b>{data.get('budget','-')}</b>\n"
-        f"📅 Рік: <b>{data.get('year','-')}</b>\n"
-        f"👤 Ім'я: <b>{data.get('name','-')}</b>\n"
-        f"📞 Контакт: <b>{data.get('contact','-')}</b>\n"
-        f"🆔 Користувач: <code>{data.get('username','-')}</code>"
+# ---------- Старт/Хелп ----------
+@bot.message_handler(commands=["start"])
+def cmd_start(m):
+    bot.reply_to(
+        m,
+        "<b>Привіт!</b> Це бот <b>AutoHouse</b>.\n"
+        "Підберу авто з США/Європи під ключ.\n\n"
+        "Натисни «🚗 Зробити замовлення» або /order.",
+        reply_markup=main_kb(),
     )
 
-# ===== Команди в приваті =====
-@bot.message_handler(commands=["start", "help"])
-def start_cmd(m):
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add(types.KeyboardButton("📝 Залишити заявку"))
-    kb.add(types.KeyboardButton("📞 Контакти"))
-    text = (
-        "Привіт! Це бот <b>AutoHouse.te</b>.\n"
-        "Я можу прийняти вашу заявку на авто та\n"
-        "дати контакти.\n\n"
-        "Натисніть <b>“Залишити заявку”</b> щоб почати."
-    )
-    bot.send_message(m.chat.id, text, reply_markup=kb)
-
-@bot.message_handler(func=lambda m: m.text == "📞 Контакти")
-def contacts_msg(m):
-    bot.send_message(
-        m.chat.id,
-        f"📞 Телефон: <b>{PHONE_READABLE}</b>\n"
-        "📍 Тернопіль\n"
-        "Пишіть сюди або натисніть кнопку Подзвонити під постами в каналі.",
+@bot.message_handler(commands=["help"])
+def cmd_help(m):
+    bot.reply_to(
+        m,
+        "Команди:\n"
+        "/order – залишити заявку\n"
+        "/contact – контакти\n"
+        "/post <текст> – публікація в канал (лише адмін)",
+        reply_markup=main_kb(),
     )
 
-@bot.message_handler(func=lambda m: m.text == "📝 Залишити заявку")
-def order_from_menu(m):
-    start_order(m)
+@bot.message_handler(commands=["contact"])
+def cmd_contact(m):
+    bot.reply_to(m, f"📞 Телефон: <b>{PHONE_READABLE}</b>", reply_markup=main_kb())
 
-# ===== Хендлери заявок =====
-def start_order(m):
-    uid = m.from_user.id
-    orders[uid] = {"step": "car", "data": {"username": m.from_user.username or m.from_user.id}}
-    bot.send_message(uid, "🚗 Вкажіть <b>марку та модель</b> авто (напр. BMW 3 Series).")
+# ---------- Проста форма заявки ----------
+STATE = {}         # user_id -> назва кроку
+LEAD = {}          # user_id -> тимчасові відповіді
 
-@bot.callback_query_handler(func=lambda c: c.data == "order_start")
-def cb_order(c):
-    bot.answer_callback_query(c.id)
-    start_order(c.message)
+def ask(m, text):
+    return bot.send_message(m.chat.id, text)
 
-@bot.message_handler(func=lambda m: orders.get(m.from_user.id, {}).get("step") == "car")
-def order_car(m):
-    uid = m.from_user.id
-    orders[uid]["data"]["car"] = m.text.strip()
-    orders[uid]["step"] = "budget"
-    bot.send_message(uid, "💸 Який <b>бюджет</b>? (грн/€/$)")
+@bot.message_handler(commands=["order"])
+def cmd_order(m):
+    STATE[m.from_user.id] = "brand"
+    LEAD[m.from_user.id] = {}
+    ask(m, "Яка марка/модель цікавить?")
 
-@bot.message_handler(func=lambda m: orders.get(m.from_user.id, {}).get("step") == "budget")
-def order_budget(m):
-    uid = m.from_user.id
-    orders[uid]["data"]["budget"] = m.text.strip()
-    orders[uid]["step"] = "year"
-    bot.send_message(uid, "📅 Який бажаний <b>рік</b>? (можна діапазон)")
+@bot.message_handler(func=lambda m: m.text == "🚗 Зробити замовлення")
+def btn_order(m):
+    cmd_order(m)
 
-@bot.message_handler(func=lambda m: orders.get(m.from_user.id, {}).get("step") == "year")
-def order_year(m):
-    uid = m.from_user.id
-    orders[uid]["data"]["year"] = m.text.strip()
-    orders[uid]["step"] = "name"
-    bot.send_message(uid, "👤 Як до вас звертатись? <b>Ім'я</b>")
+@bot.message_handler(func=lambda m: STATE.get(m.from_user.id) == "brand")
+def step_brand(m):
+    LEAD[m.from_user.id]["brand"] = m.text.strip()
+    STATE[m.from_user.id] = "budget"
+    ask(m, "Який бюджет (у $)?")
 
-@bot.message_handler(func=lambda m: orders.get(m.from_user.id, {}).get("step") == "name")
-def order_name(m):
-    uid = m.from_user.id
-    orders[uid]["data"]["name"] = m.text.strip()
-    orders[uid]["step"] = "contact"
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-    kb.add(types.KeyboardButton("Поділитись телефоном", request_contact=True))
-    bot.send_message(uid, "📞 Дайте контакт: телефон або @username", reply_markup=kb)
+@bot.message_handler(func=lambda m: STATE.get(m.from_user.id) == "budget")
+def step_budget(m):
+    LEAD[m.from_user.id]["budget"] = m.text.strip()
+    STATE[m.from_user.id] = "year"
+    ask(m, "Бажаний рік випуску?")
 
-@bot.message_handler(content_types=["contact"])
-def order_contact_share(m):
-    uid = m.from_user.id
-    if uid in orders and orders[uid].get("step") == "contact":
-        phone = m.contact.phone_number
-        orders[uid]["data"]["contact"] = phone
-        finish_order(uid, m)
+@bot.message_handler(func=lambda m: STATE.get(m.from_user.id) == "year")
+def step_year(m):
+    LEAD[m.from_user.id]["year"] = m.text.strip()
+    data = LEAD.pop(m.from_user.id, {})
+    STATE.pop(m.from_user.id, None)
 
-@bot.message_handler(func=lambda m: orders.get(m.from_user.id, {}).get("step") == "contact")
-def order_contact_text(m):
-    uid = m.from_user.id
-    orders[uid]["data"]["contact"] = m.text.strip()
-    finish_order(uid, m)
+    summary = (
+        "🆕 <b>Нова заявка</b>\n"
+        f"👤 {m.from_user.first_name or ''} @{m.from_user.username or ''}\n"
+        f"🚗 Модель: {data.get('brand','-')}\n"
+        f"💵 Бюджет: {data.get('budget','-')}\n"
+        f"📅 Рік: {data.get('year','-')}\n"
+        f"📞 {PHONE_READABLE}"
+    )
 
-def finish_order(uid: int, m):
-    data = orders[uid]["data"]
-    text = order_summary(data)
-    # надсилаємо адміну
-    if ADMIN_ID:
-        bot.send_message(ADMIN_ID, text)
-    # підтвердження клієнту
-    bot.send_message(uid, "✅ Дякую! Ми зв'яжемося найближчим часом.\n"
-                          f"Якщо терміново — телефонуйте: <b>{PHONE_READABLE}</b>")
-    orders.pop(uid, None)
+    # Відправляємо адміну
+    try:
+        if ADMIN_ID:
+            bot.send_message(int(ADMIN_ID), summary)
+    except Exception as e:
+        log.error(f"send to admin failed: {e}")
 
-# ===== Пости в канал (тільки адмін) =====
+    # Підтвердження користувачу
+    bot.reply_to(m, "Дякую! Ми вже обробляємо вашу заявку. Очікуйте на контакт ☎️", reply_markup=main_kb())
+
+# ---------- Публікація в канал (для адміна) ----------
 @bot.message_handler(commands=["post"])
-def post_cmd(m):
+def cmd_post(m):
     if not is_admin(m.from_user.id):
-        return bot.reply_to(m, "Команда лише для адміністратора.")
+        return bot.reply_to(m, "Команда доступна лише адміну.")
 
-    # текст після /post
-    parts = m.text.split(" ", 1)
-    caption = parts[1].strip() if len(parts) > 1 else "(без тексту)"
+    text = m.text.partition(" ")[2].strip()
+    if not CHANNEL_ID:
+        return bot.reply_to(m, "CHANNEL_ID не налаштований у Render → Environment.")
+    if not text:
+        return bot.reply_to(m, "Приклад: /post Продамо Audi A6 2018…")
 
-    # якщо відповідь на фото/док — шлемо медіа, інакше звичайний пост
-    if m.reply_to_message and m.reply_to_message.photo:
-        # беремо найбільше фото
-        file_id = m.reply_to_message.photo[-1].file_id
-        bot.send_photo(CHANNEL_ID, file_id, caption=caption, reply_markup=channel_button_row())
-    elif m.reply_to_message and (m.reply_to_message.document or m.reply_to_message.video):
-        if m.reply_to_message.document:
-            bot.send_document(CHANNEL_ID, m.reply_to_message.document.file_id,
-                              caption=caption, reply_markup=channel_button_row())
-        else:
-            bot.send_video(CHANNEL_ID, m.reply_to_message.video.file_id,
-                           caption=caption, reply_markup=channel_button_row())
-    else:
-        bot.send_message(CHANNEL_ID, caption, reply_markup=channel_button_row())
+    try:
+        bot.send_message(CHANNEL_ID, text, disable_web_page_preview=False)
+        bot.reply_to(m, "Опубліковано ✅")
+    except Exception as e:
+        log.error(f"post failed: {e}")
+        bot.reply_to(m, f"Помилка публікації: {e}")
 
-    bot.reply_to(m, "✅ Опубліковано.")
-
-# ===== Старт поллінгу =====
+# ---------- Запуск ----------
 if __name__ == "__main__":
-    # важливо: logger_level має бути саме числом
-    logging.getLogger("telebot").setLevel(logging.INFO)
-    bot.infinity_polling(skip_pending=True, timeout=60, long_polling_timeout=60)
+    log.info("Bot started. Polling…")
+    # allowed_updates обмежує типи подій та робить polling стабільнішим
+    bot.infinity_polling(skip_pending=True, timeout=20, long_polling_timeout=20, allowed_updates=["message"])
